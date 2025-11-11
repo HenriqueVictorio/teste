@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from openpyxl import load_workbook
 from io import BytesIO
 import time
 
@@ -30,120 +31,100 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🌿 FMC | Portal de Automação de Relatórios")
-st.caption("Atualize planilhas em segundos — substituições automáticas otimizadas.")
+st.caption("Mantém estrutura original do Excel e registra tempos por etapa.")
 
 st.divider()
 
-# ---------------------- UPLOAD ----------------------
 uploaded_file = st.file_uploader("📂 Envie o arquivo Excel (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
-    start_time = time.time()  # Início da contagem de tempo
+    global_start = time.time()
+    timings = {}
 
     try:
-        # Ler aba "Base"
-        excel = pd.ExcelFile(uploaded_file)
-        sheet_name = next((s for s in excel.sheet_names if s.strip().lower() == "base"), None)
-        if not sheet_name:
+        # 🕒 Leitura do Excel (mantendo estrutura)
+        t0 = time.time()
+        wb = load_workbook(uploaded_file)
+        if "Base" not in wb.sheetnames:
             st.error("❌ Não foi encontrada aba chamada 'Base'. Verifique o nome da aba.")
             st.stop()
+        ws = wb["Base"]
+        timings["Leitura do Excel"] = time.time() - t0
 
-        df = pd.read_excel(excel, sheet_name=sheet_name)
+        # Extrair cabeçalhos
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        df = pd.DataFrame(ws.iter_rows(min_row=2, values_only=True), columns=headers)
+
         total_changes = 0
-
-        # 1️⃣ Substituir "Input Nov" → "Input Dez" em todo o DataFrame (strings apenas)
-        df = df.applymap(lambda x: x.replace("Input Nov", "Input Dez") if isinstance(x, str) else x)
-
-        # Guardar índice de linhas modificadas
         changed_rows = set()
 
-        # 2️⃣ Coluna Brand → trocar valores específicos
-        if "Brand" in df.columns:
-            mask_brand = df["Brand"].isin(["ALTACOR", "AMETISTA"])
-            df.loc[df["Brand"] == "ALTACOR", "Brand"] = "B1"
-            df.loc[df["Brand"] == "AMETISTA", "Brand"] = "B2"
-            changed_rows.update(df.index[mask_brand].tolist())
-            total_changes += int(mask_brand.sum())
+        # 🔁 Substituições “Input Nov” → “Input Dez”
+        t1 = time.time()
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, str) and "Input Nov" in cell.value:
+                    cell.value = cell.value.replace("Input Nov", "Input Dez")
+                    total_changes += 1
+        timings["Substituição Input Nov/Dez"] = time.time() - t1
 
-        # 3️⃣ Coluna Regional → trocar valores específicos
-        if "Regional" in df.columns:
-            mask_regional = df["Regional"] == "Cana Cerrado"
-            df.loc[mask_regional, "Regional"] = "B3"
-            changed_rows.update(df.index[mask_regional].tolist())
-            total_changes += int(mask_regional.sum())
+        # 🔄 Alterações em Brand e Regional
+        t2 = time.time()
+        col_brand = headers.index("Brand") + 1 if "Brand" in headers else None
+        col_regional = headers.index("Regional") + 1 if "Regional" in headers else None
 
-        # 4️⃣ Colunas 25-Feb e 25-Jan → valor 10 apenas nas linhas alteradas
-        if changed_rows:
-            for col in ["25-Feb", "25-Jan"]:
-                if col in df.columns:
-                    df.loc[list(changed_rows), col] = 10
-                    total_changes += len(changed_rows)
+        if col_brand:
+            for i, cell in enumerate(ws.iter_cols(min_col=col_brand, max_col=col_brand, min_row=2)[0], start=2):
+                if cell.value == "ALTACOR":
+                    cell.value = "B1"
+                    changed_rows.add(i)
+                    total_changes += 1
+                elif cell.value == "AMETISTA":
+                    cell.value = "B2"
+                    changed_rows.add(i)
+                    total_changes += 1
 
-        # ---------------------- FINALIZAÇÃO ----------------------
-        elapsed = time.time() - start_time
+        if col_regional:
+            for i, cell in enumerate(ws.iter_cols(min_col=col_regional, max_col=col_regional, min_row=2)[0], start=2):
+                if cell.value == "Cana Cerrado":
+                    cell.value = "B3"
+                    changed_rows.add(i)
+                    total_changes += 1
+        timings["Alterações Brand/Regional"] = time.time() - t2
 
-        st.success(f"✅ Processamento concluído! {total_changes} alterações em {elapsed:.2f} segundos.")
-        st.write("**Prévia dos dados atualizados (primeiras 10 linhas):**")
-        st.dataframe(df.head(10))
+        # 🔢 Atualização das colunas “25-Feb” e “25-Jan” nas linhas alteradas
+        t3 = time.time()
+        for col_name in ["25-Feb", "25-Jan"]:
+            if col_name in headers:
+                col_idx = headers.index(col_name) + 1
+                for row_num in changed_rows:
+                    ws.cell(row=row_num, column=col_idx).value = 10
+                    total_changes += 1
+        timings["Atualização 25-Feb/25-Jan"] = time.time() - t3
 
-        # ---------------------- SALVAR E PREPARAR DOWNLOAD ----------------------
+        # 💾 Salvando mantendo tudo original
+        t4 = time.time()
         output = BytesIO()
-        saved_as_excel = False
+        wb.save(output)
+        output.seek(0)
+        timings["Gravação Excel"] = time.time() - t4
 
-        # Tentar salvar como .xlsx usando openpyxl (mais comum)
-        try:
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Base")
-            output.seek(0)
-            st.download_button(
-                "📥 Baixar Excel Atualizado (.xlsx)",
-                data=output.getvalue(),
-                file_name="fmc_atualizado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-            saved_as_excel = True
-        except Exception as e_openpyxl:
-            # Se falhar, tentar sem especificar engine (pandas escolherá se puder)
-            try:
-                output = BytesIO()
-                with pd.ExcelWriter(output) as writer:
-                    df.to_excel(writer, index=False, sheet_name="Base")
-                output.seek(0)
-                st.download_button(
-                    "📥 Baixar Excel Atualizado (.xlsx)",
-                    data=output.getvalue(),
-                    file_name="fmc_atualizado.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-                saved_as_excel = True
-            except Exception as e_all:
-                # Fallback: gerar CSV para download e informar como instalar libs
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                st.warning("Não foi possível criar um arquivo .xlsx neste ambiente. Fornecendo .csv como alternativa.")
-                st.download_button(
-                    "📥 Baixar CSV Atualizado (.csv)",
-                    data=csv_bytes,
-                    file_name="fmc_atualizado.csv",
-                    mime="text/csv",
-                )
-                st.info(
-                    "Se quiser habilitar o download em .xlsx no futuro, instale no ambiente um dos motores:\n"
-                    "`pip install openpyxl`  (recomendado)  ou  `pip install xlsxwriter`"
-                )
+        total_time = time.time() - global_start
 
-        # Exibir log simples por coluna (opcional)
-        log_msgs = []
-        if "Brand" in df.columns:
-            log_msgs.append(f"Brand: {int(df['Brand'].isin(['B1','B2']).sum())} mudanças")
-        if "Regional" in df.columns:
-            log_msgs.append(f"Regional: {int(df['Regional'].isin(['B3']).sum())} mudanças")
-        for col in ["25-Feb", "25-Jan"]:
-            if col in df.columns and changed_rows:
-                log_msgs.append(f"{col}: {len(changed_rows)} mudanças (linhas alteradas)")
+        # ---------------------- RESULTADOS ----------------------
+        st.success(f"✅ Automação concluída em {total_time:.2f} segundos, total de {total_changes} alterações.")
+        st.write("**Detalhamento de tempo por etapa:**")
+        for etapa, t in timings.items():
+            st.write(f"• {etapa}: {t:.2f} s")
 
-        if log_msgs:
-            st.write("**Resumo por coluna:**")
-            st.write(" • " + " | ".join(log_msgs))
+        st.divider()
+        st.download_button(
+            "📥 Baixar Excel Atualizado (estrutura preservada)",
+            data=output.getvalue(),
+            file_name="fmc_atualizado.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        st.caption("✅ Estrutura, fórmulas e formatação 100% preservadas.")
 
     except Exception as e:
         st.error(f"Erro ao processar o arquivo: {e}")
