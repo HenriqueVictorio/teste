@@ -1,59 +1,93 @@
 import streamlit as st
+import pandas as pd
 from io import BytesIO
-from openpyxl import load_workbook
-from openpyxl.cell.cell import MergedCell
 
-st.set_page_config(page_title="FMC Automação", page_icon="🌿")
+# ---------------------- CONFIGURAÇÃO BÁSICA ----------------------
+st.set_page_config(page_title="FMC Automação", page_icon="🌿", layout="centered")
 
-st.title("🌿 FMC | Atualizador de 'Input Nov' para 'Input Dez'")
-st.caption("Envie o Excel e baixe a versão atualizada em segundos!")
+st.markdown("""
+<style>
+:root {
+    --fmc-green: #007a4d;
+    --fmc-green-light: #ebf5f1;
+}
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(180deg, #ffffff 0%, var(--fmc-green-light) 100%);
+}
+[data-testid="stHeader"] {background: transparent;}
+.block-container {padding-top: 3rem; max-width: 900px;}
+.stButton button {
+    background-color: var(--fmc-green); color: white; font-weight: 600; border: none;
+}
+.stButton button:hover {background-color: #005f3a;}
+.stDownloadButton button {
+    background-color: white; border: 2px solid var(--fmc-green); color: var(--fmc-green);
+    font-weight: 600;
+}
+.stDownloadButton button:hover {background-color: var(--fmc-green); color: white;}
+</style>
+""", unsafe_allow_html=True)
 
-arquivo = st.file_uploader("📂 Envie o arquivo Excel (.xlsx)", type=["xlsx"])
+st.title("🌿 FMC | Portal de Automação de Relatórios")
+st.caption("Atualize planilhas em segundos — substituições automáticas de colunas e valores.")
 
-if arquivo:
+st.divider()
+
+# ---------------------- UPLOAD ----------------------
+uploaded_file = st.file_uploader("📂 Envie o arquivo Excel (.xlsx)", type=["xlsx"])
+
+if uploaded_file:
     try:
-        wb = load_workbook(arquivo)
-    except Exception:
-        st.error("Erro ao abrir o arquivo. Verifique se é um .xlsx válido.")
-        st.stop()
+        # Lê apenas a aba "Base" (case-insensitive)
+        excel = pd.ExcelFile(uploaded_file)
+        sheet_name = next((s for s in excel.sheet_names if s.strip().lower() == "base"), None)
+        if not sheet_name:
+            st.error("❌ Não foi encontrada aba chamada 'Base'. Verifique o nome da aba.")
+            st.stop()
 
-    # Encontrar aba 'Base' (case-insensitive)
-    aba = None
-    for nome in wb.sheetnames:
-        if nome.strip().lower() == "base":
-            aba = wb[nome]
-            break
+        df = pd.read_excel(excel, sheet_name=sheet_name)
 
-    if not aba:
-        st.warning("A aba 'Base' não foi encontrada. Nenhuma alteração feita.")
-    else:
-        # Achar colunas "Key Figure"
-        cabecalhos = []
-        for linha in aba.iter_rows(min_row=1, max_row=aba.max_row, max_col=aba.max_column):
-            for cel in linha:
-                if not isinstance(cel, MergedCell) and isinstance(cel.value, str):
-                    if cel.value.strip().lower() == "key figure":
-                        cabecalhos.append((cel.row, cel.column))
+        # ---------------------- MODIFICAÇÕES ----------------------
+        total_changes = 0
 
-        alteracoes = 0
-        for (linha_ini, col) in cabecalhos:
-            for i in range(linha_ini + 1, aba.max_row + 1):
-                cel = aba.cell(row=i, column=col)
-                if not isinstance(cel, MergedCell) and isinstance(cel.value, str):
-                    if "Input Nov" in cel.value:
-                        cel.value = cel.value.replace("Input Nov", "Input Dez")
-                        alteracoes += 1
+        # 1️⃣ Substituir "Input Nov" → "Input Dez" em todo o DataFrame
+        df = df.map(lambda x: x.replace("Input Nov", "Input Dez") if isinstance(x, str) else x)
 
-        if alteracoes:
-            st.success(f"✅ {alteracoes} célula(s) atualizada(s) com sucesso!")
-            buffer = BytesIO()
-            wb.save(buffer)
-            buffer.seek(0)
-            st.download_button(
-                label="⬇️ Baixar arquivo atualizado",
-                data=buffer,
-                file_name="fmc_atualizado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("Nenhuma ocorrência de 'Input Nov' foi encontrada nas colunas 'Key Figure'.")
+        # 2️⃣ Coluna Brand → trocar valores específicos
+        if "Brand" in df.columns:
+            df["Brand"] = df["Brand"].replace({"ALTACOR": "B1", "AMETISTA": "B2"})
+            total_changes += df["Brand"].isin(["B1", "B2"]).sum()
+
+        # 3️⃣ Coluna Regional → trocar valores específicos
+        if "Regional" in df.columns:
+            df["Regional"] = df["Regional"].replace({"Cana Cerrado": "B3"})
+            total_changes += df["Regional"].isin(["B3"]).sum()
+
+        # 4️⃣ Colunas 25-Feb e 25-Jan → todos os valores = 10
+        for col in ["25-Feb", "25-Jan"]:
+            if col in df.columns:
+                df[col] = 10
+                total_changes += len(df)
+
+        # ---------------------- RESULTADO ----------------------
+        st.success(f"✅ Processamento concluído! {total_changes} modificações realizadas.")
+
+        st.write("**Prévia dos dados atualizados:**")
+        st.dataframe(df.head(10))
+
+        # Salvar em memória
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Base")
+        output.seek(0)
+
+        # Botão de download
+        st.download_button(
+            "📥 Baixar Excel Atualizado",
+            data=output.getvalue(),
+            file_name="fmc_atualizado.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    except Exception as e:
+        st.error(f"Erro ao processar o arquivo: {e}")
