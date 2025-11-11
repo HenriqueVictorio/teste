@@ -1,172 +1,125 @@
-"""Streamlit app for FMC to update Excel Key Figure column."""
-
-from __future__ import annotations
+# Streamlit (leve) – FMC: atualizar "Input Nov" -> "Input Dez" na aba 'Base'
+# Otimizações:
+# 1) Evita ler a planilha inteira: usa bounds reais (calculate_dimension) para limitar linhas/colunas.
+# 2) Procura o header "Key Figure" só nas primeiras linhas úteis (padrão: 5).
+# 3) Opera apenas nas colunas onde o header foi encontrado, a partir da linha do header.
+# 4) Evita copiar bytes desnecessariamente: passa o arquivo diretamente para o openpyxl.
+# 5) Interface Streamlit mínima (sem CSS pesado).
 
 from io import BytesIO
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Tuple
 
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.utils import range_boundaries
 from openpyxl.utils.exceptions import InvalidFileException
 
-st.set_page_config(
-    page_title="FMC Automação",
-    page_icon="🌿",
-    layout="centered",
-)
+# ---------------- UI ----------------
+st.set_page_config(page_title="FMC Automação (Leve)", page_icon="🌿", layout="centered")
 
-_CUSTOM_CSS = """
-<style>
-:root {
-    --fmc-green: #007a4d;
-    --fmc-green-light: #ebf5f1;
-    --fmc-dark: #1d1d1b;
-}
+st.title("FMC | Portal de Automação de Relatórios (Offline/Leve)")
+st.caption("Envie o .xlsx. O app procura a aba **Base**, acha as colunas **Key Figure** "
+           "e substitui `Input Nov` por `Input Dez`, preservando o restante do arquivo.")
 
-[data-testid="stAppViewContainer"] {
-    background: linear-gradient(180deg, #ffffff 0%, var(--fmc-green-light) 100%);
-}
+uploaded_file = st.file_uploader("Envie o arquivo Excel (.xlsx)", type=["xlsx"])
 
-[data-testid="stHeader"] {
-    background: transparent;
-}
+# ---------------- Núcleo de desempenho ----------------
+def _used_bounds(ws: Worksheet) -> Tuple[int, int, int, int]:
+    """Retorna os limites reais de uso (min_col, min_row, max_col, max_row)."""
+    # Ex.: 'A1:D57' reflete a área com dados, ignorando formatação "fantasma"
+    min_c, min_r, max_c, max_r = range_boundaries(ws.calculate_dimension())
+    return min_c, min_r, max_c, max_r
 
-.block-container {
-    padding-top: 3rem;
-    max-width: 880px;
-}
+def _find_key_figure_positions(ws: Worksheet, header_rows: int = 5) -> Dict[int, int]:
+    """
+    Retorna {coluna: linha_do_header} para cada coluna cujo header (em até 'header_rows' linhas do topo usado)
+    seja exatamente 'Key Figure' (case-insensitive).
+    """
+    positions: Dict[int, int] = {}
+    min_c, min_r, max_c, max_r = _used_bounds(ws)
+    max_header_row = min(min_r + header_rows - 1, max_r)
+    target = "key figure"
 
-.stButton button {
-    background-color: var(--fmc-green);
-    border: none;
-    color: white;
-    font-weight: 600;
-}
-
-.stButton button:hover {
-    background-color: #005f3a;
-}
-
-.stDownloadButton button {
-    background-color: white;
-    border: 2px solid var(--fmc-green);
-    color: var(--fmc-green);
-    font-weight: 600;
-}
-
-.stDownloadButton button:hover {
-    background-color: var(--fmc-green);
-    color: white;
-}
-</style>
-"""
-
-st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
-
-st.title("FMC | Portal de Automação de Relatórios")
-st.caption(
-    "Atualize arquivos de planejamento em segundos: basta enviar o Excel e baixar a versão com 'Input Dez'."
-)
-
-st.divider()
-
-with st.expander("ℹ️ Como funciona", expanded=False):
-    st.markdown(
-        "- O aplicativo localiza todas as colunas **Key Figure** em cada planilha.\n"
-        "- Todo valor de célula contendo `Input Nov` é substituído por `Input Dez`.\n"
-        "- A formatação original e demais conteúdos do arquivo são preservados."
-    )
-
-uploaded_file = st.file_uploader(
-    "Envie o arquivo Excel da FMC", type=["xlsx"], help="Somente arquivos .xlsx são aceitos."
-)
-
-
-def _find_key_figure_headers(sheet: Worksheet) -> List[Tuple[int, int]]:
-    """Return all (row, column) coordinates where the header equals 'Key Figure'."""
-    headers: List[Tuple[int, int]] = []
-    for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, max_col=sheet.max_column):
-        for cell in row:
-            if isinstance(cell, MergedCell) or cell.row is None or cell.column is None:
-                continue
-            value = cell.value
-            if isinstance(value, str) and value.strip().lower() == "key figure":
-                headers.append((cell.row, cell.column))
-    return headers
-
-
-def _replace_input_values(sheet: Worksheet, headers: Iterable[Tuple[int, int]]) -> int:
-    """Replace 'Input Nov' with 'Input Dez' below each header and return hit count."""
-    replacements = 0
-    for header_row, column in headers:
-        for row_idx in range(header_row + 1, sheet.max_row + 1):
-            cell = sheet.cell(row=row_idx, column=column)
+    for r in range(min_r, max_header_row + 1):
+        for c in range(min_c, max_c + 1):
+            cell = ws.cell(r, c)
             if isinstance(cell, MergedCell):
                 continue
-            value = cell.value
-            if isinstance(value, str) and "Input Nov" in value:
-                cell.value = value.replace("Input Nov", "Input Dez")
-                replacements += 1
-    return replacements
+            v = cell.value
+            if isinstance(v, str) and v.strip().lower() == target:
+                # guarda a primeira ocorrência por coluna (mais alta)
+                positions.setdefault(c, r)
+    return positions
 
+def _replace_values(ws: Worksheet, col_to_header_row: Dict[int, int]) -> int:
+    """Para cada coluna alvo, substitui 'Input Nov' por 'Input Dez' abaixo do cabeçalho. Retorna contagem."""
+    if not col_to_header_row:
+        return 0
 
-def _process_workbook(xlsx_bytes: bytes) -> Tuple[BytesIO, Dict[str, int]]:
-    """Load workbook, apply replacements, and return stream plus per-sheet summary."""
-    workbook = load_workbook(BytesIO(xlsx_bytes), data_only=False)
-    summary: Dict[str, int] = {}
-
-    for sheet in workbook.worksheets:
-        headers = _find_key_figure_headers(sheet)
-        if not headers:
+    min_c, min_r, max_c, max_r = _used_bounds(ws)
+    hits = 0
+    for c, header_row in col_to_header_row.items():
+        start = header_row + 1
+        if start > max_r:
             continue
-        hits = _replace_input_values(sheet, headers)
+        for r in range(start, max_r + 1):
+            cell = ws.cell(r, c)
+            if isinstance(cell, MergedCell):
+                continue
+            v = cell.value
+            if isinstance(v, str) and "Input Nov" in v:
+                cell.value = v.replace("Input Nov", "Input Dez")
+                hits += 1
+    return hits
+
+def _process_workbook(file_like) -> Tuple[BytesIO, Dict[str, int]]:
+    """Carrega, processa e devolve stream do arquivo atualizado + sumário por aba."""
+    # Carrega sem copiar bytes para memória; mantém formatação (write_only=False)
+    wb = load_workbook(file_like, data_only=False, read_only=False, keep_vba=False)
+
+    # Localiza 'Base' (case-insensitive)
+    base_name = None
+    for name in wb.sheetnames:
+        if isinstance(name, str) and name.strip().lower() == "base":
+            base_name = name
+            break
+
+    summary: Dict[str, int] = {}
+    if base_name is not None:
+        ws = wb[base_name]
+        positions = _find_key_figure_positions(ws, header_rows=5)
+        hits = _replace_values(ws, positions)
         if hits:
-            summary[sheet.title] = hits
+            summary[ws.title] = hits
 
-    output = BytesIO()
-    workbook.save(output)
-    output.seek(0)
-    return output, summary
+    # Salva em memória
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out, summary
 
-
-result_stream: Optional[BytesIO] = None
-report: Dict[str, int] = {}
-
-if uploaded_file:
-    file_bytes = uploaded_file.getvalue()
+# ---------------- Execução ----------------
+if uploaded_file is not None:
     try:
-        result_stream, report = _process_workbook(file_bytes)
+        uploaded_file.seek(0)  # garante início do stream
+        result_stream, report = _process_workbook(uploaded_file)
     except InvalidFileException:
-        st.error("Arquivo inválido. Verifique se está enviando um .xlsx compatível.")
+        st.error("Arquivo inválido. Envie um .xlsx compatível.")
         st.stop()
-    except Exception as exc:  # pragma: no cover - defensive for unexpected cases
-        st.error(f"Ocorreu um erro inesperado: {exc}")
+    except Exception as e:
+        st.error(f"Ocorreu um erro inesperado: {e}")
         st.stop()
 
     if report:
-        total_replacements = sum(report.values())
-        st.success(
-            f"Processamento concluído! {total_replacements} célula(s) atualizada(s) em "
-            f"{len(report)} planilha(s)."
-        )
-        with st.container():
-            st.markdown("**Detalhes por aba:**")
-            for sheet_name, count in report.items():
-                st.write(f"• {sheet_name}: {count} substituição(ões)")
+        total = sum(report.values())
+        st.success(f"Concluído! {total} célula(s) atualizada(s) na aba {list(report.keys())[0]!r}.")
     else:
-        st.warning(
-            "Nenhuma ocorrência de 'Input Nov' foi encontrada na(s) coluna(s) Key Figure."
-        )
+        st.warning("Nada para alterar: não encontrei a aba 'Base' ou colunas 'Key Figure' com 'Input Nov'.")
 
-    if result_stream is not None:
-        st.download_button(
-            "Baixar Excel Atualizado",
-            data=result_stream.getvalue(),
-            file_name="fmc_key_figure_atualizado.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-st.divider()
-
+    st.download_button(
+        "⬇️ Baixar Excel Atualizado",
+        data=result_stream.getvalue(),
+        file_name="fmc_key_figure_atualizado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
