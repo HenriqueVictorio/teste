@@ -123,3 +123,4 @@ if uploaded_file is not None:
         data=result_stream.getvalue(),
         file_name="fmc_key_figure_atualizado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
