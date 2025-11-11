@@ -31,7 +31,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🌿 FMC | Portal de Automação de Relatórios")
-st.caption("Mantém estrutura original do Excel e registra tempos por etapa.")
+st.caption("Mantém estrutura original do Excel e mostra tempos de execução por etapa.")
 
 st.divider()
 
@@ -42,7 +42,7 @@ if uploaded_file:
     timings = {}
 
     try:
-        # 🕒 Leitura do Excel (mantendo estrutura)
+        # 🕒 1️⃣ Leitura do Excel (mantendo estrutura)
         t0 = time.time()
         wb = load_workbook(uploaded_file)
         if "Base" not in wb.sheetnames:
@@ -51,14 +51,14 @@ if uploaded_file:
         ws = wb["Base"]
         timings["Leitura do Excel"] = time.time() - t0
 
-        # Extrair cabeçalhos
-        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-        df = pd.DataFrame(ws.iter_rows(min_row=2, values_only=True), columns=headers)
+        # Obter cabeçalhos corretamente
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+        headers = list(header_row)
 
         total_changes = 0
         changed_rows = set()
 
-        # 🔁 Substituições “Input Nov” → “Input Dez”
+        # 🔁 2️⃣ Substituições “Input Nov” → “Input Dez”
         t1 = time.time()
         for row in ws.iter_rows(min_row=2):
             for cell in row:
@@ -67,7 +67,7 @@ if uploaded_file:
                     total_changes += 1
         timings["Substituição Input Nov/Dez"] = time.time() - t1
 
-        # 🔄 Alterações em Brand e Regional
+        # 🔄 3️⃣ Alterações em Brand e Regional
         t2 = time.time()
         col_brand = headers.index("Brand") + 1 if "Brand" in headers else None
         col_regional = headers.index("Regional") + 1 if "Regional" in headers else None
@@ -91,7 +91,7 @@ if uploaded_file:
                     total_changes += 1
         timings["Alterações Brand/Regional"] = time.time() - t2
 
-        # 🔢 Atualização das colunas “25-Feb” e “25-Jan” nas linhas alteradas
+        # 🔢 4️⃣ Atualização das colunas “25-Feb” e “25-Jan” nas linhas alteradas
         t3 = time.time()
         for col_name in ["25-Feb", "25-Jan"]:
             if col_name in headers:
@@ -101,7 +101,7 @@ if uploaded_file:
                     total_changes += 1
         timings["Atualização 25-Feb/25-Jan"] = time.time() - t3
 
-        # 💾 Salvando mantendo tudo original
+        # 💾 5️⃣ Salvando mantendo estrutura original
         t4 = time.time()
         output = BytesIO()
         wb.save(output)
