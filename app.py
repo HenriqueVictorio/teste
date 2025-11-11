@@ -170,6 +170,3 @@ if uploaded_file:
 
 st.divider()
 
-st.markdown(
-    "Caso precise de outra automação, entre em contato com o time digital FMC."
-)
